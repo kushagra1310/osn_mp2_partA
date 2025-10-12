@@ -95,6 +95,23 @@ struct proc {
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process
 
+  uint64 text_start;       // Start of text segment
+  uint64 text_end;         // End of text segment
+  uint64 data_start;       // Start of data segment
+  uint64 data_end;         // End of data segment
+  uint64 heap_start;       // Start of heap
+  uint64 stack_top;        // Top of stack
+  
+  struct inode *exec_ip;   // Inode for executable (for loading pages)
+  
+  // FIFO tracking
+  int next_seq;            // Next sequence number for FIFO
+  
+  // Per-page metadata
+  struct page_info *pages; // Array of page metadata
+  int num_pages;           // Number of pages tracked
+
+
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
   uint64 sz;                   // Size of process memory (bytes)

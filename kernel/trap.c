@@ -68,13 +68,26 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else if((r_scause() == 15 || r_scause() == 13) &&
-            vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
-    // page fault on lazily-allocated page
   } else {
-    printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
-    setkilled(p);
+    uint64 scause = r_scause();
+    
+    //  printf("DEBUG: In corrected trap handler! scause=%ld\n", scause);
+    // Check for all three types of page faults
+    if(scause == 12 || scause == 13 || scause == 15) {
+      // An Instruction fault (12) or Load fault (13) are reads.
+      // A Store fault (15) is a write.
+      int is_write = (scause == 15);
+      
+      // Call the fault handler. If it returns < 0, there was a real error.
+      if(vmfault(p->pagetable, r_stval(), is_write) < 0) {
+        setkilled(p);
+      }
+    } else {
+      // This is not a page fault we can handle.
+      printf("usertrap(): unexpected scause 0x%lx pid=%d\n", scause, p->pid);
+      printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+      setkilled(p);
+    }
   }
 
   if(killed(p))

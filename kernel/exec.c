@@ -6,8 +6,10 @@
 #include "proc.h"
 #include "defs.h"
 #include "elf.h"
+#include "paging.h"
+#include "memstat.h"
 
-static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
+static int loadseg_lazy(struct proc *p, uint64 va, struct inode *ip, uint offset, uint filesz, uint memsz);
 
 // map ELF permissions to PTE permission bits.
 int flags2perm(int flags)
@@ -20,9 +22,6 @@ int flags2perm(int flags)
     return perm;
 }
 
-//
-// the implementation of the exec() system call
-//
 int
 kexec(char *path, char **argv)
 {
@@ -37,7 +36,6 @@ kexec(char *path, char **argv)
 
   begin_op();
 
-  // Open the executable file.
   if((ip = namei(path)) == 0){
     end_op();
     return -1;
@@ -48,14 +46,21 @@ kexec(char *path, char **argv)
   if(readi(ip, 0, (uint64)&elf, 0, sizeof(elf)) != sizeof(elf))
     goto bad;
 
-  // Is this really an ELF file?
   if(elf.magic != ELF_MAGIC)
     goto bad;
 
   if((pagetable = proc_pagetable(p)) == 0)
     goto bad;
 
-  // Load program into memory.
+  // Initialize page tracking
+  init_page_tracking(p);
+  
+  uint64 text_start = 0xFFFFFFFFFFFFFFFF;
+  uint64 text_end = 0;
+  uint64 data_start = 0xFFFFFFFFFFFFFFFF;
+  uint64 data_end = 0;
+
+  // Load program segments LAZILY - don't allocate or load pages yet
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
     if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph))
       goto bad;
@@ -67,13 +72,30 @@ kexec(char *path, char **argv)
       goto bad;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
-    uint64 sz1;
-    if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz, flags2perm(ph.flags))) == 0)
+    
+    // Track text/data regions
+    int perm = flags2perm(ph.flags);
+    if(perm & PTE_X) {
+      // Text segment
+      if(ph.vaddr < text_start) text_start = ph.vaddr;
+      if(ph.vaddr + ph.memsz > text_end) text_end = ph.vaddr + ph.memsz;
+    } else {
+      // Data segment
+      if(ph.vaddr < data_start) data_start = ph.vaddr;
+      if(ph.vaddr + ph.memsz > data_end) data_end = ph.vaddr + ph.memsz;
+    }
+    
+    // Register pages for lazy loading
+    if(loadseg_lazy(p, ph.vaddr, ip, ph.off, ph.filesz, ph.memsz) < 0)
       goto bad;
-    sz = sz1;
-    if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
-      goto bad;
+    
+    if(ph.vaddr + ph.memsz > sz)
+      sz = ph.vaddr + ph.memsz;
   }
+  
+  // Keep inode reference for lazy loading
+  p->exec_ip = idup(ip);
+  
   iunlockput(ip);
   end_op();
   ip = 0;
@@ -81,25 +103,37 @@ kexec(char *path, char **argv)
   p = myproc();
   uint64 oldsz = p->sz;
 
-  // Allocate some pages at the next page boundary.
-  // Make the first inaccessible as a stack guard.
-  // Use the rest as the user stack.
+  // Allocate stack pages LAZILY
   sz = PGROUNDUP(sz);
-  uint64 sz1;
-  if((sz1 = uvmalloc(pagetable, sz, sz + (USERSTACK+1)*PGSIZE, PTE_W)) == 0)
-    goto bad;
+  uint64 sz1 = sz + (USERSTACK+1)*PGSIZE;
+  
+  // Don't actually allocate - just update size
   sz = sz1;
-  uvmclear(pagetable, sz-(USERSTACK+1)*PGSIZE);
   sp = sz;
   stackbase = sp - USERSTACK*PGSIZE;
 
-  // Copy argument strings into new stack, remember their
-  // addresses in ustack[].
+  // Store segment boundaries
+  p->text_start = text_start;
+  p->text_end = text_end;
+  p->data_start = (data_start == 0xFFFFFFFFFFFFFFFF) ? text_end : data_start;
+  p->data_end = (data_end == 0) ? p->data_start : data_end;
+  p->heap_start = PGROUNDUP(p->data_end);
+  p->stack_top = sz;
+  p->next_seq=1;
+
+  //  printf("[pid %d] EXEC: next_seq initialized to %d\n", p->pid, p->next_seq);
+
+  // Log initialization
+  printf("[pid %d] INIT-LAZYMAP text=[0x%lx,0x%lx) data=[0x%lx,0x%lx) heap_start=0x%lx stack_top=0x%lx\n",
+         p->pid, p->text_start, p->text_end, p->data_start, p->data_end, 
+         p->heap_start, p->stack_top);
+
+  // Copy argument strings into new stack
   for(argc = 0; argv[argc]; argc++) {
     if(argc >= MAXARG)
       goto bad;
     sp -= strlen(argv[argc]) + 1;
-    sp -= sp % 16; // riscv sp must be 16-byte aligned
+    sp -= sp % 16;
     if(sp < stackbase)
       goto bad;
     if(copyout(pagetable, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
@@ -108,7 +142,7 @@ kexec(char *path, char **argv)
   }
   ustack[argc] = 0;
 
-  // push a copy of ustack[], the array of argv[] pointers.
+  // push the array of argv[] pointers.
   sp -= (argc+1) * sizeof(uint64);
   sp -= sp % 16;
   if(sp < stackbase)
@@ -116,26 +150,70 @@ kexec(char *path, char **argv)
   if(copyout(pagetable, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
     goto bad;
 
-  // a0 and a1 contain arguments to user main(argc, argv)
-  // argc is returned via the system call return
-  // value, which goes in a0.
   p->trapframe->a1 = sp;
 
-  // Save program name for debugging.
+  // Save program name
   for(last=s=path; *s; s++)
     if(*s == '/')
       last = s+1;
   safestrcpy(p->name, last, sizeof(p->name));
     
-  // Commit to the user image.
+  // Commit to the user image
   oldpagetable = p->pagetable;
   p->pagetable = pagetable;
   p->sz = sz;
-  p->trapframe->epc = elf.entry;  // initial program counter = ulib.c:start()
-  p->trapframe->sp = sp; // initial stack pointer
+  p->trapframe->epc = elf.entry;
+  p->trapframe->sp = sp;
+  
+  // Force load the entry point page so execution can start
+  // This is done so that os doesn't immediately go back to kernel mode after entering the user mode at the time of starting of a process. This ensures no errors (was getting some without using it)
+  
+  uint64 entry_va = PGROUNDDOWN(elf.entry);
+  struct page_info *entry_pi = find_page_info(p, entry_va);
+  
+  if(entry_pi && entry_pi->state == UNMAPPED) {
+    char *mem = kalloc();
+    if(mem == 0) {
+      proc_freepagetable(pagetable, sz);
+      p->pagetable = oldpagetable;
+      p->sz = oldsz;
+      return -1;
+    }
+    memset(mem, 0, PGSIZE);
+    
+    // Load from executable
+    if(entry_pi->filesz > 0) {
+      if(readi(p->exec_ip, 0, (uint64)mem, entry_pi->offset, entry_pi->filesz) != entry_pi->filesz) {
+        kfree(mem);
+        proc_freepagetable(pagetable, sz);
+        p->pagetable = oldpagetable;
+        p->sz = oldsz;
+        return -1;
+      }
+    }
+    
+    printf("[pid %d] LOADEXEC va=0x%lx\n", p->pid, entry_va);
+
+    // Map with execute permission for text
+    int perm = PTE_U | PTE_R | PTE_X;
+    if(mappages(pagetable, entry_va, PGSIZE, (uint64)mem, perm) != 0) {
+      kfree(mem);
+      proc_freepagetable(pagetable, sz);
+      p->pagetable = oldpagetable;
+      p->sz = oldsz;
+      return -1;
+    }
+    
+    // Update page info
+    entry_pi->state = RESIDENT;
+    entry_pi->is_dirty = 0;
+    entry_pi->seq = p->next_seq++;
+    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, entry_va, entry_pi->seq); // we map it and store it without pagefault
+  }
+  
   proc_freepagetable(oldpagetable, oldsz);
 
-  return argc; // this ends up in a0, the first argument to main(argc, argv)
+  return argc;
 
  bad:
   if(pagetable)
@@ -147,26 +225,29 @@ kexec(char *path, char **argv)
   return -1;
 }
 
-// Load an ELF program segment into pagetable at virtual address va.
-// va must be page-aligned
-// and the pages from va to va+sz must already be mapped.
-// Returns 0 on success, -1 on failure.
+// Register pages for lazy loading without allocating them
 static int
-loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz)
+loadseg_lazy(struct proc *p, uint64 va, struct inode *ip, uint offset, uint filesz, uint memsz)
 {
-  uint i, n;
-  uint64 pa;
-
-  for(i = 0; i < sz; i += PGSIZE){
-    pa = walkaddr(pagetable, va + i);
-    if(pa == 0)
-      panic("loadseg: address should exist");
-    if(sz - i < PGSIZE)
-      n = sz - i;
-    else
-      n = PGSIZE;
-    if(readi(ip, 0, (uint64)pa, offset+i, n) != n)
+  uint64 i;
+  
+  for(i = 0; i < memsz; i += PGSIZE){
+    struct page_info *pi = alloc_page_info(p, va + i);
+    if(pi == 0)
       return -1;
+    
+    pi->state = UNMAPPED;
+    pi->offset = offset + i;
+    
+    // Calculate file size for this page
+    if(i < filesz) {
+      if(filesz - i < PGSIZE)
+        pi->filesz = filesz - i;
+      else
+        pi->filesz = PGSIZE;
+    } else {
+      pi->filesz = 0; // BSS segment
+    }
   }
   
   return 0;

@@ -7,6 +7,8 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "fs.h"
+#include "paging.h"
+#include "memstat.h"
 
 /*
  * the kernel's page table.
@@ -352,7 +354,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0) {
-      if((pa0 = vmfault(pagetable, va0, 0)) == 0) {
+      if((pa0 = vmfault(pagetable, va0, 1)) == 0) {
         return -1;
       }
     }
@@ -450,25 +452,108 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 // returns 0 if va is invalid or already mapped, or if
 // out of physical memory, and physical address if successful.
 uint64
-vmfault(pagetable_t pagetable, uint64 va, int read)
+vmfault(pagetable_t pagetable, uint64 va, int write)
 {
-  uint64 mem;
   struct proc *p = myproc();
+    // printf("[pid %d] VMFAULT_ENTRY: va=0x%lx, pagetable=%p, next_seq=%d\n", 
+    //      p->pid, va, pagetable, p->next_seq);
 
-  if (va >= p->sz)
-    return 0;
+  uint64 mem;
   va = PGROUNDDOWN(va);
+  
+  // Determine access type
+  char *access_type = write ? "write" : "read";
+  
+  // Check if address is valid
+  int in_text = (va >= p->text_start && va < p->text_end);
+  int in_data = (va >= p->data_start && va < p->data_end);
+  int in_heap = (va >= p->heap_start && va < p->sz);
+  int in_stack = (va < p->stack_top && va >= p->stack_top - USERSTACK*PGSIZE);
+  
+  // Find or create page info
+  struct page_info *pi = find_page_info(p, va);
+  
+  // Determine cause
+  char *cause = "unknown";
+  if(in_text || in_data) {
+    cause = "exec";
+  } else if(in_heap) {
+    cause = "heap";
+  } else if(in_stack) {
+    cause = "stack";
+  }
+  
+  // Log page fault
+  printf("[pid %d] PAGEFAULT va=0x%lx access=%s cause=%s\n", 
+         p->pid, va, access_type, cause);
+  
+  // Check if valid access
+  if(!in_text && !in_data && !in_heap && !in_stack) {
+    printf("[pid %d] KILL invalid-access va=0x%lx access=%s\n", 
+           p->pid, va, access_type);
+    setkilled(p);
+    return 0;
+  }
+  
+  // Check if already mapped
   if(ismapped(pagetable, va)) {
+    return walkaddr(pagetable, va);
+  }
+  
+  // Allocate physical page
+  mem = (uint64)kalloc();
+  if(mem == 0) {
+    // Out of memory - will handle in checkpoint 2
     return 0;
   }
-  mem = (uint64) kalloc();
-  if(mem == 0)
-    return 0;
-  memset((void *) mem, 0, PGSIZE);
-  if (mappages(p->pagetable, va, PGSIZE, mem, PTE_W|PTE_U|PTE_R) != 0) {
-    kfree((void *)mem);
+  
+  memset((void*)mem, 0, PGSIZE);
+  
+  // Handle different cases
+  if(in_text || in_data) {
+    // Load from executable
+    if(pi && pi->filesz > 0) {
+      ilock(p->exec_ip);
+      if(readi(p->exec_ip, 0, mem, pi->offset, pi->filesz) != pi->filesz) {
+        iunlock(p->exec_ip);
+        kfree((void*)mem);
+        return 0;
+      }
+      iunlock(p->exec_ip);
+    }
+    
+    printf("[pid %d] LOADEXEC va=0x%lx\n", p->pid, va);
+  } else {
+    // Heap or stack - zero-filled
+    printf("[pid %d] ALLOC va=0x%lx\n", p->pid, va);
+  }
+  
+  // Map the page
+  int perm = PTE_U | PTE_R;
+  if(in_data || in_heap || in_stack) {
+    perm |= PTE_W;
+  }
+  if(in_text) {
+    perm |= PTE_X;
+  }
+  
+  if(mappages(pagetable, va, PGSIZE, mem, perm) != 0) {
+    kfree((void*)mem);
     return 0;
   }
+  sfence_vma();
+  // Update page info
+  if(!pi) {
+    pi = alloc_page_info(p, va);
+  }
+  if(pi) {
+    pi->state = RESIDENT;
+    pi->is_dirty = 0;
+    pi->seq = p->next_seq++;
+
+    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, va, pi->seq);
+  }
+  
   return mem;
 }
 

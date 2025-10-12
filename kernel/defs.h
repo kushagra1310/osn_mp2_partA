@@ -66,6 +66,14 @@ void            log_write(struct buf*);
 void            begin_op(void);
 void            end_op(void);
 
+// In defs.h, add to the appropriate sections:
+
+// paging.c
+void            init_page_tracking(struct proc*);
+void            free_page_tracking(struct proc*);
+struct page_info* find_page_info(struct proc*, uint64);
+struct page_info* alloc_page_info(struct proc*, uint64);
+
 // pipe.c
 int             pipealloc(struct file**, struct file**);
 void            pipeclose(struct pipe*, int);
