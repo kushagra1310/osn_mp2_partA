@@ -346,6 +346,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
   pte_t *pte;
+  int attempts = 0;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
@@ -354,6 +355,12 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0) {
+      attempts++;
+      if(attempts > 3) {
+        // Prevent infinite loop
+        printf("copyout: too many page fault attempts for va=0x%lx\n", va0);
+        return -1;
+      }
       if((pa0 = vmfault(pagetable, va0, 1)) == 0) {
         return -1;
       }
@@ -455,11 +462,13 @@ uint64
 vmfault(pagetable_t pagetable, uint64 va, int write)
 {
   struct proc *p = myproc();
-    // printf("[pid %d] VMFAULT_ENTRY: va=0x%lx, pagetable=%p, next_seq=%d\n", 
-    //      p->pid, va, pagetable, p->next_seq);
-
   uint64 mem;
   va = PGROUNDDOWN(va);
+  
+  // Check if already mapped
+  if(ismapped(pagetable, va)) {
+    return walkaddr(pagetable, va);
+  }
   
   // Determine access type
   char *access_type = write ? "write" : "read";
@@ -495,16 +504,67 @@ vmfault(pagetable_t pagetable, uint64 va, int write)
     return 0;
   }
   
-  // Check if already mapped
-  if(ismapped(pagetable, va)) {
-    return walkaddr(pagetable, va);
-  }
-  
-  // Allocate physical page
+  // Try to allocate physical page
   mem = (uint64)kalloc();
+  
+  // If allocation failed, need to evict a page
   if(mem == 0) {
-    // Out of memory - will handle in checkpoint 2
-    return 0;
+    printf("[pid %d] MEMFULL\n", p->pid);
+    
+    // Check if we have any resident pages to evict
+    int resident_count = count_resident_pages(p);
+    printf("[pid %d] DEBUG: resident pages = %d\n", p->pid, resident_count);
+    
+    // Find victim using FIFO
+    struct page_info *victim = find_fifo_victim(p);
+    
+    if(victim == 0) {
+      // No resident pages to evict - this shouldn't happen
+      printf("[pid %d] KILL no-victim\n", p->pid);
+      setkilled(p);
+      return 0;
+    }
+    
+    // Log victim selection
+    printf("[pid %d] VICTIM va=0x%lx seq=%d algo=FIFO\n", 
+           p->pid, victim->va, victim->seq);
+    
+    // Evict the victim page
+    if(evict_page(p, victim) < 0) {
+      printf("[pid %d] KILL evict-failed\n", p->pid);
+      setkilled(p);
+      return 0;
+    }
+    
+    // Try to allocate again after eviction
+    mem = (uint64)kalloc();
+    if(mem == 0) {
+      // Still no memory - try one more eviction
+      printf("[pid %d] DEBUG: First eviction didn't free memory, trying again\n", p->pid);
+      
+      victim = find_fifo_victim(p);
+      if(victim == 0) {
+        printf("[pid %d] KILL still-no-memory\n", p->pid);
+        setkilled(p);
+        return 0;
+      }
+      
+      printf("[pid %d] VICTIM va=0x%lx seq=%d algo=FIFO\n", 
+             p->pid, victim->va, victim->seq);
+      
+      if(evict_page(p, victim) < 0) {
+        printf("[pid %d] KILL evict-failed-2\n", p->pid);
+        setkilled(p);
+        return 0;
+      }
+      
+      mem = (uint64)kalloc();
+      if(mem == 0) {
+        printf("[pid %d] KILL out-of-memory\n", p->pid);
+        setkilled(p);
+        return 0;
+      }
+    }
   }
   
   memset((void*)mem, 0, PGSIZE);
@@ -541,7 +601,7 @@ vmfault(pagetable_t pagetable, uint64 va, int write)
     kfree((void*)mem);
     return 0;
   }
-  sfence_vma();
+  
   // Update page info
   if(!pi) {
     pi = alloc_page_info(p, va);
@@ -550,7 +610,7 @@ vmfault(pagetable_t pagetable, uint64 va, int write)
     pi->state = RESIDENT;
     pi->is_dirty = 0;
     pi->seq = p->next_seq++;
-
+    
     printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, va, pi->seq);
   }
   

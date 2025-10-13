@@ -73,6 +73,9 @@ void            init_page_tracking(struct proc*);
 void            free_page_tracking(struct proc*);
 struct page_info* find_page_info(struct proc*, uint64);
 struct page_info* alloc_page_info(struct proc*, uint64);
+struct page_info* find_fifo_victim(struct proc*);
+int             evict_page(struct proc*, struct page_info*);
+int             count_resident_pages(struct proc*);
 
 // pipe.c
 int             pipealloc(struct file**, struct file**);

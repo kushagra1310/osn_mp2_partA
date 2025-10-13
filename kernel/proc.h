@@ -102,6 +102,11 @@ struct proc {
   uint64 heap_start;       // Start of heap
   uint64 stack_top;        // Top of stack
   
+  struct file *swapfile;     // Swap file handle
+  char swapname[32];         // Swap file name
+  int swap_slots[1024];      // Bitmap: 1=used, 0=free (max 1024 pages)
+  int num_swap_slots_used;   // Number of slots currently in use
+  
   struct inode *exec_ip;   // Inode for executable (for loading pages)
   
   // FIFO tracking

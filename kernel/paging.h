@@ -25,5 +25,8 @@ struct page_info* find_page_info(struct proc *p, uint64 va);
 struct page_info* alloc_page_info(struct proc *p, uint64 va);
 void init_page_tracking(struct proc *p);
 void free_page_tracking(struct proc *p);
+struct page_info* find_fifo_victim(struct proc *p);
+int evict_page(struct proc *p, struct page_info *pi);
+int count_resident_pages(struct proc *p);
 
 #endif
