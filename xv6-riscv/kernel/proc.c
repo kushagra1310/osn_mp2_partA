@@ -246,7 +246,7 @@ int growproc(int n)
   sz = p->sz;
   if (n > 0)
   {
-    if (sz + n > TRAPFRAME)
+    if (sz + n >= TRAPFRAME)
     {
       return -1;
     }

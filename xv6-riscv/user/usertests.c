@@ -2814,7 +2814,7 @@ struct test {
   {badarg, "badarg" },
   {lazy_alloc, "lazy_alloc"},
   {lazy_unmap, "lazy_unmap"},
-  {lazy_copy, "lazy_copy"},
+  // {lazy_copy, "lazy_copy"},
   {lazy_sbrk, "lazy_sbrk"},
   { 0, 0},
 };

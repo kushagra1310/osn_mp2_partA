@@ -359,7 +359,6 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 // All leaf mappings must already have been removed.
 void freewalk(pagetable_t pagetable)
 {
-  // there are 2^9 = 512 PTEs in a page table.
   for (int i = 0; i < 512; i++)
   {
     pte_t pte = pagetable[i];
@@ -372,7 +371,13 @@ void freewalk(pagetable_t pagetable)
     }
     else if (pte & PTE_V)
     {
-      panic("freewalk: leaf");
+      // CHANGED: Don't panic - just free the leaf page
+      // This handles lazy-allocated pages
+      if (PTE_FLAGS(pte) == PTE_V)
+        panic("freewalk: not a leaf");
+      uint64 pa = PTE2PA(pte);
+      kfree((void *)pa);
+      pagetable[i] = 0;
     }
   }
   kfree((void *)pagetable);
@@ -619,10 +624,35 @@ int ismapped(pagetable_t pagetable, uint64 va)
 // Returns physical address if successful, 0 otherwise
 uint64 handle_kernel_pagefault(pagetable_t pagetable, uint64 va, int is_write)
 {
+  struct proc *p = myproc();
   va = PGROUNDDOWN(va);
 
-  // Trigger lazy load with appropriate access type
-  int cause = is_write ? 15 : 13; // 15=write, 13=read
+  // Validate address range BEFORE trying to handle the fault
+  // For system calls (copyin/copyout), we don't kill the process for invalid addresses
+  // We just return 0 (error) so the system call fails gracefully
+  if(va >= TRAPFRAME) {
+    return 0;  // Too high - reject
+  }
+  
+  // Check if address is within valid user space
+  // For lazy allocation, we check against segments
+  int is_valid = 0;
+  
+  if(va >= p->paging.text_start && va < p->paging.text_end) {
+    is_valid = 1;
+  } else if(va >= p->paging.data_start && va < p->paging.data_end) {
+    is_valid = 1;
+  } else if(va >= p->paging.heap_start && va < p->sz) {
+    is_valid = 1;
+  }
+  
+  // Don't allow arbitrary addresses
+  if(!is_valid) {
+    return 0;  // Invalid - return error, DON'T kill process
+  }
+
+  // Address is valid - try to load/allocate the page
+  int cause = is_write ? 15 : 13;
   if (handle_page_fault(va, cause) == 0)
   {
     uint64 pa = walkaddr(pagetable, va);
@@ -643,6 +673,7 @@ uint64 handle_kernel_pagefault(pagetable_t pagetable, uint64 va, int is_write)
   }
   return 0;
 }
+
 
 void init_paging_info(struct proc *p)
 {
@@ -691,7 +722,14 @@ int handle_page_fault(uint64 va, int cause)
 {
   struct proc *p = myproc();
   va = PGROUNDDOWN(va);
-
+  if (va >= MAXVA)
+  {
+    // Address too high - kill process
+    printf("[pid %d] KILL invalid-access va=0x%lx access=%s\n",
+           p->pid, va, cause == 15 ? "write" : "read");
+    // setkilled(p);
+    return -1;
+  }
   //  if(va == 0x0) {
   //   printf("[pid %d] DEBUG: va=0x0 text=[0x%lx,0x%lx) data=[0x%lx,0x%lx) heap=[0x%lx,0x%lx)\n",
   //          p->pid, p->paging.text_start, p->paging.text_end,
@@ -934,7 +972,7 @@ int handle_page_fault(uint64 va, int cause)
          p->pid, va, access_type);
   printf("[pid %d] KILL invalid-access va=0x%lx access=%s\n",
          p->pid, va, access_type);
-
+  setkilled(p);
   return -1;
 }
 

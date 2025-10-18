@@ -89,7 +89,7 @@ usertrap(void)
       // Page fault handler failed - kill process immediately
       printf("usertrap(): unhandled page fault at 0x%lx pid=%d\n", stval, p->pid);
       setkilled(p);
-      kexit(-1);  // Don't return - exit immediately
+      // kexit(-1);  // Don't return - exit immediately
     }
   }
   else
@@ -97,7 +97,7 @@ usertrap(void)
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", scause, p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), stval);
     setkilled(p);
-    kexit(-1);  // Don't return - exit immediately
+    // kexit(-1);  // Don't return - exit immediately
   }
 }
 
