@@ -54,7 +54,7 @@ static void free_swap_slot(struct proc *p, int slot)
   }
 }
 
-static int create_swap_file(struct proc *p)
+int create_swap_file(struct proc *p)
 {
   if (p->paging.swapfile != 0)
     return 0;
@@ -446,14 +446,31 @@ int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   while (len > 0)
   {
     va0 = PGROUNDDOWN(dstva);
+
     pa0 = walkaddr(pagetable, va0);
 
-    // If page not present, try to handle page fault
     if (pa0 == 0)
     {
-      pa0 = handle_kernel_pagefault(pagetable, va0);
+      pa0 = handle_kernel_pagefault(pagetable, va0, 1);
       if (pa0 == 0)
         return -1;
+    }
+
+    // CRITICAL: Check writability
+    pte_t *pte = walk(pagetable, va0, 0);
+    if (!pte)
+    {
+      // printf("copyout: no PTE for va=0x%lx\n", va0);
+      return -1;
+    }
+
+    // printf("copyout: va=0x%lx pte=0x%lx PTE_V=%d PTE_W=%d\n",
+    //  va0, *pte, (*pte & PTE_V) ? 1 : 0, (*pte & PTE_W) ? 1 : 0);
+
+    if (!(*pte & PTE_W))
+    {
+      // printf("copyout: REJECT write to read-only page va=0x%lx\n", va0);
+      return -1;
     }
 
     n = PGSIZE - (dstva - va0);
@@ -483,7 +500,7 @@ int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
     // If page not present, try to handle page fault
     if (pa0 == 0)
     {
-      pa0 = handle_kernel_pagefault(pagetable, va0);
+      pa0 = handle_kernel_pagefault(pagetable, va0, 0);
       if (pa0 == 0)
         return -1;
     }
@@ -513,13 +530,20 @@ int copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   {
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
+
+    // If page not present, try to handle page fault
     if (pa0 == 0)
-      return -1;
+    {
+      pa0 = handle_kernel_pagefault(pagetable, va0, 0);
+      if (pa0 == 0)
+        return -1;
+    }
+
     n = PGSIZE - (srcva - va0);
     if (n > max)
       n = max;
 
-    char *p = (char *)(pa0 + (srcva - va0));
+    char *p = (char *)pa0 + (srcva - va0);
     while (n > 0)
     {
       if (*p == '\0')
@@ -540,14 +564,11 @@ int copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 
     srcva = va0 + PGSIZE;
   }
+
   if (got_null)
-  {
     return 0;
-  }
   else
-  {
     return -1;
-  }
 }
 
 // allocate and map user memory if process is referencing a page
@@ -594,17 +615,32 @@ int ismapped(pagetable_t pagetable, uint64 va)
 }
 // Handle page fault from kernel context (e.g., copyout/copyin)
 // Returns physical address if successful, 0 otherwise
-uint64 handle_kernel_pagefault(pagetable_t pagetable, uint64 va)
+// Handle page fault from kernel context (e.g., copyout/copyin)
+// Returns physical address if successful, 0 otherwise
+uint64 handle_kernel_pagefault(pagetable_t pagetable, uint64 va, int is_write)
 {
-  // struct proc *p = myproc();
+  va = PGROUNDDOWN(va);
 
-  // Try to handle the page fault
-  if (handle_page_fault(va, 15) == 0)
-  { // Treat as write fault
-    // Successfully handled, now walk to get the physical address
-    return walkaddr(pagetable, va);
+  // Trigger lazy load with appropriate access type
+  int cause = is_write ? 15 : 13; // 15=write, 13=read
+  if (handle_page_fault(va, cause) == 0)
+  {
+    uint64 pa = walkaddr(pagetable, va);
+    if (pa == 0)
+      return 0;
+
+    // If write access is needed, check writability
+    if (is_write)
+    {
+      pte_t *pte = walk(pagetable, va, 0);
+      if (!pte || !(*pte & PTE_W))
+      {
+        return 0; // Not writable - reject
+      }
+    }
+
+    return pa; // Success
   }
-
   return 0;
 }
 
@@ -627,7 +663,8 @@ void init_paging_info(struct proc *p)
   memset(p->paging.swap_bitmap, 0, SWAP_BITMAP_SIZE);
 }
 
-void cleanup_paging_info(struct proc *p) {
+void cleanup_paging_info(struct proc *p)
+{
   // Just print stats - don't actually close files here
   // The file cleanup will happen through normal process cleanup
   // if(p->paging.swapfile) {
@@ -636,17 +673,16 @@ void cleanup_paging_info(struct proc *p) {
   //   // fileclose(p->paging.swapfile);
   //   p->paging.swapfile = 0;
   // }
-  
+
   // // Don't free exec_ip here either
   // p->paging.exec_ip = 0;
 }
-
 
 struct page_info *get_page_info(struct proc *p, uint64 va)
 {
   va = PGROUNDDOWN(va);
   uint64 page_num = va / PGSIZE;
-  if (page_num >= 35000)
+  if (page_num >= MAX_TRACKED_PAGES)
     return 0;
   return &p->paging.pages[page_num];
 }
@@ -656,6 +692,12 @@ int handle_page_fault(uint64 va, int cause)
   struct proc *p = myproc();
   va = PGROUNDDOWN(va);
 
+  //  if(va == 0x0) {
+  //   printf("[pid %d] DEBUG: va=0x0 text=[0x%lx,0x%lx) data=[0x%lx,0x%lx) heap=[0x%lx,0x%lx)\n",
+  //          p->pid, p->paging.text_start, p->paging.text_end,
+  //          p->paging.data_start, p->paging.data_end,
+  //          p->paging.heap_start, p->sz);
+  // }
   char *access_type;
   if (cause == 13)
     access_type = "read";
@@ -663,6 +705,17 @@ int handle_page_fault(uint64 va, int cause)
     access_type = "write";
   else
     access_type = "exec";
+  if ((va >= p->paging.text_start && va < p->paging.text_end) && cause == 15)
+  {
+    setkilled(p);
+    return 0;
+  }
+  // pte_t *pte = walk(p->pagetable, va, 0);
+  // if(pte && (*pte & PTE_V)) {
+  //   // Page is already valid - this shouldn't happen
+  //   printf("[pid %d] WARNING: page fault on already-mapped page va=0x%lx\n", p->pid, va);
+  //   return 0;  // Already handled
+  // }
 
   // Check if page is swapped FIRST (before anything else)
   struct page_info *pi = get_page_info(p, va);
@@ -695,7 +748,7 @@ int handle_page_fault(uint64 va, int cause)
         return -1;
       }
     }
-    
+
     memset(mem, 0, PGSIZE);
 
     // Calculate file offset for this page
@@ -865,7 +918,7 @@ int handle_page_fault(uint64 va, int cause)
     {
       pi->va = va;
       pi->state = RESIDENT;
-      pi->dirty = 1;  // Mark heap pages as dirty
+      pi->dirty = 1; // Mark heap pages as dirty
       pi->fifo_seq = p->paging.next_fifo_seq++;
       pi->from_exec = 0;
       pi->swap_slot = -1;
@@ -884,7 +937,6 @@ int handle_page_fault(uint64 va, int cause)
 
   return -1;
 }
-
 
 uint64 alloc_zero_page(pagetable_t pagetable, uint64 va, int perm)
 {
@@ -1068,24 +1120,9 @@ int swapout_page(uint64 va)
   return 0;
 }
 
-uint64 uvmalloc_lazy(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
+uint64 uvmalloc_lazy(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int perm)
 {
-  if (newsz < oldsz)
-    return oldsz;
-
-  oldsz = PGROUNDUP(oldsz);
-
-  // Create PTEs but mark them invalid (lazy)
-  for (uint64 a = oldsz; a < newsz; a += PGSIZE)
-  {
-    pte_t *pte = walk(pagetable, a, 1);
-    if (pte == 0)
-    {
-      uvmdealloc(pagetable, a, oldsz);
-      return 0;
-    }
-    *pte = 0; // Invalid - will cause page fault
-  }
-
+  // Don't create any PTEs - just return the new size
+  // Pages will be allocated on-demand via page faults
   return newsz;
 }

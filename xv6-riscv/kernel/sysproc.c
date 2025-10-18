@@ -131,7 +131,7 @@ sys_memstat(void)
   
   // Count pages
   int page_count = 0;
-  for(int i = 0; i < 35000 && page_count < MAX_PAGES_INFO; i++) {
+  for(int i = 0; i < MAX_TRACKED_PAGES && page_count < MAX_PAGES_INFO; i++) {
     if(p->paging.pages[i].state != UNMAPPED) {
       info->pages[page_count].va = p->paging.pages[i].va;
       info->pages[page_count].state = p->paging.pages[i].state;

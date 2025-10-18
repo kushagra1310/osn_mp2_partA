@@ -199,7 +199,9 @@ void            init_paging_info(struct proc *p);
 void            cleanup_paging_info(struct proc *p);
 uint64          uvmalloc_lazy(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm);
 
-uint64            handle_kernel_pagefault(pagetable_t, uint64);
+uint64          handle_kernel_pagefault(pagetable_t pagetable, uint64 va, int is_write);
+int create_swap_file(struct proc *p);
+
 
 
 // number of elements in fixed-size array

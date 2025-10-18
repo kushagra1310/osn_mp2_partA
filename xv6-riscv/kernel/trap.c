@@ -70,34 +70,36 @@ usertrap(void)
   {
     // ok
   }
-  else
-  {
-    // Check for page faults
-    uint64 scause = r_scause();
-    uint64 stval = r_stval(); // Faulting address
+ else
+{
+  // Check for page faults
+  uint64 scause = r_scause();
+  uint64 stval = r_stval(); // Faulting address
 
-    // Page fault causes: 12=instruction, 13=load, 15=store
-    if (scause == 12 || scause == 13 || scause == 15)
+  // Page fault causes: 12=instruction, 13=load, 15=store
+  if (scause == 12 || scause == 13 || scause == 15)
+  {
+    // Try to handle the page fault
+    if (handle_page_fault(stval, scause) == 0)
     {
-      // Try to handle the page fault
-      if (handle_page_fault(stval, scause) == 0)
-      {
-        // Successfully handled - continue execution
-        // No need for goto, just skip the else blocks
-      }
-      else
-      {
-        // Page fault handler failed - kill process
-        setkilled(p);
-      }
+      // Successfully handled - continue execution
     }
     else
     {
-      printf("usertrap(): unexpected scause 0x%lx pid=%d\n", scause, p->pid);
-      printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), stval);
+      // Page fault handler failed - kill process immediately
+      printf("usertrap(): unhandled page fault at 0x%lx pid=%d\n", stval, p->pid);
       setkilled(p);
+      kexit(-1);  // Don't return - exit immediately
     }
   }
+  else
+  {
+    printf("usertrap(): unexpected scause 0x%lx pid=%d\n", scause, p->pid);
+    printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), stval);
+    setkilled(p);
+    kexit(-1);  // Don't return - exit immediately
+  }
+}
 
   if (killed(p))
     kexit(-1);

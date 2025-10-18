@@ -57,10 +57,16 @@ int kexec(char *path, char **argv)
     goto bad;
 
   // SAVE the inode reference BEFORE unlocking (for lazy loading later)
-  if (p->paging.exec_ip) {
-    iput(p->paging.exec_ip);  // Release old one if exists
+  // if (p->paging.exec_ip) {
+  //   iput(p->paging.exec_ip);  // Release old one if exists
+  // }
+  // p->paging.exec_ip = idup(ip);  // Save reference while ip is still valid
+  struct inode *old_exec_ip = p->paging.exec_ip;
+  if (old_exec_ip)
+  {
+    iput(old_exec_ip); // Within the same begin_op/end_op
   }
-  p->paging.exec_ip = idup(ip);  // Save reference while ip is still valid
+  p->paging.exec_ip = idup(ip);
 
   // Load program - lazy allocation
   for (i = 0, off = elf.phoff; i < elf.phnum; i++, off += sizeof(ph))
@@ -103,6 +109,12 @@ int kexec(char *path, char **argv)
   end_op();
   ip = 0;
 
+  // if (old_exec_ip)
+  // {
+  //   begin_op();
+  //   iput(old_exec_ip);
+  //   end_op();
+  // }
   p = myproc();
   uint64 oldsz = p->sz;
 
@@ -123,6 +135,18 @@ int kexec(char *path, char **argv)
          p->pid, p->paging.text_start, p->paging.text_end,
          p->paging.data_start, p->paging.data_end, sz, sz);
 
+  if (p->paging.swapfile)
+  {
+    fileclose(p->paging.swapfile);
+    p->paging.swapfile = 0;
+  }
+
+  // Create new swap file (will overwrite same filename)
+  if (create_swap_file(p) < 0)
+  {
+    printf("[pid %d] ERROR: Failed to create swap file\n", p->pid);
+    goto bad;
+  }
   // Push argument strings
   for (argc = 0; argv[argc]; argc++)
   {
@@ -170,7 +194,8 @@ bad:
     end_op();
   }
   // Clean up exec_ip if we set it
-  if (p->paging.exec_ip) {
+  if (p->paging.exec_ip)
+  {
     begin_op();
     iput(p->paging.exec_ip);
     end_op();
