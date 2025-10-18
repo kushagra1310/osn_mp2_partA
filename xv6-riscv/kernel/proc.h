@@ -1,3 +1,4 @@
+#include "paging.h"
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;
@@ -95,28 +96,6 @@ struct proc {
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process
 
-  uint64 text_start;       // Start of text segment
-  uint64 text_end;         // End of text segment
-  uint64 data_start;       // Start of data segment
-  uint64 data_end;         // End of data segment
-  uint64 heap_start;       // Start of heap
-  uint64 stack_top;        // Top of stack
-  
-  struct file *swapfile;     // Swap file handle
-  char swapname[32];         // Swap file name
-  int swap_slots[1024];      // Bitmap: 1=used, 0=free (max 1024 pages)
-  int num_swap_slots_used;   // Number of slots currently in use
-  
-  struct inode *exec_ip;   // Inode for executable (for loading pages)
-  
-  // FIFO tracking
-  int next_seq;            // Next sequence number for FIFO
-  
-  // Per-page metadata
-  struct page_info *pages; // Array of page metadata
-  int num_pages;           // Number of pages tracked
-
-
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
   uint64 sz;                   // Size of process memory (bytes)
@@ -126,4 +105,5 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  struct paging_info paging;
 };

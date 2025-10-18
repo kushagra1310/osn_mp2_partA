@@ -1,6 +1,8 @@
 #define SBRK_ERROR ((char *)-1)
 
 struct stat;
+struct proc_mem_stat;
+int memstat(struct proc_mem_stat*);
 
 // system calls
 int fork(void);

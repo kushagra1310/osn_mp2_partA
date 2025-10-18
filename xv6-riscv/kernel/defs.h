@@ -24,6 +24,8 @@ void            consputc(int);
 
 // exec.c
 int             kexec(char*, char**);
+int             exec_lazy(char*, char**);
+
 
 // file.c
 struct file*    filealloc(void);
@@ -54,6 +56,7 @@ void            stati(struct inode*, struct stat*);
 int             writei(struct inode*, int, uint64, uint, uint);
 void            itrunc(struct inode*);
 void            ireclaim(int);
+struct inode*     create(char*, short, short, short);
 
 // kalloc.c
 void*           kalloc(void);
@@ -65,17 +68,6 @@ void            initlog(int, struct superblock*);
 void            log_write(struct buf*);
 void            begin_op(void);
 void            end_op(void);
-
-// In defs.h, add to the appropriate sections:
-
-// paging.c
-void            init_page_tracking(struct proc*);
-void            free_page_tracking(struct proc*);
-struct page_info* find_page_info(struct proc*, uint64);
-struct page_info* alloc_page_info(struct proc*, uint64);
-struct page_info* find_fifo_victim(struct proc*);
-int             evict_page(struct proc*, struct page_info*);
-int             count_resident_pages(struct proc*);
 
 // pipe.c
 int             pipealloc(struct file**, struct file**);
@@ -146,6 +138,8 @@ void            argaddr(int, uint64 *);
 int             fetchstr(uint64, char*, int);
 int             fetchaddr(uint64, uint64*);
 void            syscall();
+uint64             sys_memstat(void);
+
 
 // trap.c
 extern uint     ticks;
@@ -191,6 +185,22 @@ void            plic_complete(int);
 void            virtio_disk_init(void);
 void            virtio_disk_rw(struct buf *, int);
 void            virtio_disk_intr(void);
+
+// Paging functions
+int             handle_page_fault(uint64 va, int cause);
+uint64          alloc_zero_page(pagetable_t pagetable, uint64 va, int perm);
+uint64          load_exec_page(pagetable_t pagetable, uint64 va, struct inode *ip, 
+                               uint64 offset, uint sz, int perm);
+int             evict_page_fifo(void);
+int             swapin_page(uint64 va);
+int             swapout_page(uint64 va);
+struct page_info* get_page_info(struct proc *p, uint64 va);
+void            init_paging_info(struct proc *p);
+void            cleanup_paging_info(struct proc *p);
+uint64          uvmalloc_lazy(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm);
+
+uint64            handle_kernel_pagefault(pagetable_t, uint64);
+
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
